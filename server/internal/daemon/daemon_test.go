@@ -2190,6 +2190,62 @@ func TestGateClaudeResumeAcrossLocalWorktrees(t *testing.T) {
 	}
 }
 
+// A cross-worktree resume re-attaches the new worktree's CLAUDE.md because
+// Claude Code tracks instruction files by path, so an unchanged brief would be
+// appended to the history again on every turn. It is excluded only when the
+// session already holds identical content; a changed brief still loads.
+func TestExcludeResumedClaudeBrief(t *testing.T) {
+	configDir := t.TempDir()
+	project := filepath.Join(configDir, "projects", "-prior-worktree")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := `{"type":"attachment","attachment":{"type":"instructions","files":[{"path":"/prior/worktree/CLAUDE.md","type":"Project","content":"BRIEF v1"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(project, "session-1.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processEnv := []string{"CLAUDE_CONFIG_DIR=" + configDir}
+
+	for _, tt := range []struct {
+		name        string
+		brief       string
+		sameWorkdir bool
+		wantExclude bool
+	}{
+		{name: "unchanged brief in new worktree", brief: "BRIEF v1", wantExclude: true},
+		{name: "changed brief in new worktree", brief: "BRIEF v2"},
+		{name: "same workdir", brief: "BRIEF v1", sameWorkdir: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			priorDir, workDir := t.TempDir(), t.TempDir()
+			if tt.sameWorkdir {
+				workDir = priorDir
+			}
+			md := filepath.Join(workDir, "CLAUDE.md")
+			file := "<!-- BEGIN MULTICA-RUNTIME (auto-managed; do not edit) -->\n" + tt.brief + "\n<!-- END MULTICA-RUNTIME -->\n"
+			if err := os.WriteFile(md, []byte(file), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			env := &execenv.Environment{RootDir: t.TempDir(), WorkDir: workDir}
+			task := Task{PriorSessionID: "session-1", PriorWorkDir: priorDir}
+
+			excludeResumedClaudeBrief(env, processEnv, task, slog.Default())
+
+			excluded := false
+			if env.ClaudeSettingsPath != "" {
+				data, err := os.ReadFile(env.ClaudeSettingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				excluded = strings.Contains(string(data), md)
+			}
+			if excluded != tt.wantExclude {
+				t.Fatalf("excluded = %v, want %v (settings %q)", excluded, tt.wantExclude, env.ClaudeSettingsPath)
+			}
+		})
+	}
+}
+
 // Hermes resumes from HERMES_HOME, independently of the task's cwd (#9062).
 func TestGateHermesResumeToSessionHome(t *testing.T) {
 	t.Parallel()

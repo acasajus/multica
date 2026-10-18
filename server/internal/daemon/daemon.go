@@ -6557,6 +6557,27 @@ func worktreeResumeEligible(provider string, env *execenv.Environment, codexStor
 	}
 }
 
+// excludeResumedClaudeBrief stops a cross-worktree Claude resume from adding
+// an unchanged brief to the history again. Claude Code tracks CLAUDE.md by path,
+// and each local_directory turn writes it into a new worktree, so without this
+// every resumed turn appended another copy. A brief whose content changed since
+// the session last loaded it is left alone, so the agent still sees the update.
+func excludeResumedClaudeBrief(env *execenv.Environment, processEnv []string, task Task, taskLog *slog.Logger) {
+	if task.PriorSessionID == "" || sameExistingDir(env.WorkDir, task.PriorWorkDir) {
+		return
+	}
+	path := filepath.Join(env.WorkDir, "CLAUDE.md")
+	content, err := os.ReadFile(path)
+	if err != nil || !agent.ClaudeSessionHasInstructions(processEnv, env.WorkDir, task.PriorSessionID, string(content)) {
+		return
+	}
+	if err := execenv.ExcludeClaudeMd(env, path); err != nil {
+		taskLog.Warn("could not exclude CLAUDE.md the resumed session already holds", "path", path, "error", err)
+		return
+	}
+	taskLog.Info("resumed session already holds this CLAUDE.md; excluding the repeat", "path", path)
+}
+
 func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv, provider, envWorkDir string, sessionHomeReachable, refusesMissingSessionCwd, worktreeResumeEligible bool, taskLog *slog.Logger) bool {
 	var reachable bool
 	if providerUsesPiSessionFile(provider) {
@@ -8461,6 +8482,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
 	if err != nil {
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+	}
+	if provider == "claude" {
+		excludeResumedClaudeBrief(env, os.Environ(), task, taskLog)
 	}
 	// An exempt turn runs in the user's directory without having queued for it,
 	// so a sibling coding task may be writing to the same tree right now. That

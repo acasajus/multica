@@ -1356,3 +1356,46 @@ func TestClaudeSessionTranscriptPresent(t *testing.T) {
 		})
 	}
 }
+
+// A resumed session that already loaded a CLAUDE.md with the same content
+// must be recognised, whatever path it was loaded from.
+func TestClaudeSessionHasInstructions(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir()
+	project := filepath.Join(configDir, "projects", "-ws-prior-worktree")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := `{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"attachment","attachment":{"type":"instructions","files":[{"path":"/home/u/.claude/CLAUDE.md","type":"User","content":"user rules"},{"path":"/ws/prior/worktree/CLAUDE.md","type":"Project","content":"BRIEF v1"}]}}
+not json
+`
+	if err := os.WriteFile(filepath.Join(project, "sess-1.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CLAUDE_CONFIG_DIR=" + configDir}
+	cwd := t.TempDir()
+
+	for _, tt := range []struct {
+		name      string
+		sessionID string
+		content   string
+		want      bool
+	}{
+		{name: "identical content loaded from another path", sessionID: "sess-1", content: "BRIEF v1", want: true},
+		// Claude Code stores CLAUDE.md with HTML comments removed and trimmed,
+		// so the file on disk keeps the daemon's managed-block markers.
+		{name: "file still carries HTML comment markers", sessionID: "sess-1", content: "<!-- BEGIN MULTICA-RUNTIME (auto-managed; do not edit) -->\nBRIEF v1\n<!-- END MULTICA-RUNTIME -->\n", want: true},
+		{name: "only comments", sessionID: "sess-1", content: "<!-- note -->\n"},
+		{name: "changed content", sessionID: "sess-1", content: "BRIEF v2"},
+		{name: "empty content", sessionID: "sess-1", content: ""},
+		{name: "missing session", sessionID: "sess-2", content: "BRIEF v1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClaudeSessionHasInstructions(env, cwd, tt.sessionID, tt.content); got != tt.want {
+				t.Fatalf("ClaudeSessionHasInstructions = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

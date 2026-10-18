@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -156,4 +157,37 @@ func workspaceClaimsRuntimeSkill(name string, workspaceSkills []SkillContextForE
 		}
 	}
 	return false
+}
+
+// ExcludeClaudeMd adds path to claudeMdExcludes in the task-local Claude
+// settings, creating the settings file when the task has none yet. Existing
+// skill policy in the file is kept.
+func ExcludeClaudeMd(env *Environment, path string) error {
+	settingsPath := env.ClaudeSettingsPath
+	if settingsPath == "" {
+		settingsPath = filepath.Join(env.RootDir, claudeRuntimeSkillSettingsFile)
+	}
+	settings := map[string]any{}
+	data, err := os.ReadFile(settingsPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("parse claude settings %s: %w", settingsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	excludes, _ := settings["claudeMdExcludes"].([]any)
+	if !slices.Contains(excludes, any(path)) {
+		excludes = append(excludes, path)
+	}
+	settings["claudeMdExcludes"] = excludes
+	data, err = json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		return err
+	}
+	env.ClaudeSettingsPath = settingsPath
+	return nil
 }

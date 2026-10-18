@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -945,6 +947,68 @@ func ClaudeSessionTranscriptPresent(env []string, cwd, sessionID string) bool {
 	}
 	_, err = findClaudeSessionFile(configDir, sessionID)
 	return err == nil
+}
+
+// claudeMdComment matches the HTML comments Claude Code strips from CLAUDE.md
+// before storing it, such as the daemon's managed-block markers.
+var claudeMdComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// normalizeClaudeInstructions maps CLAUDE.md content to the form Claude Code
+// stores in its transcript: HTML comments removed, surrounding space trimmed.
+// Any other transformation makes the comparison miss, which only means the file
+// loads again.
+func normalizeClaudeInstructions(content string) string {
+	return strings.TrimSpace(claudeMdComment.ReplaceAllString(content, ""))
+}
+
+// ClaudeSessionHasInstructions reports whether the session's transcript already
+// carries a loaded instruction file (CLAUDE.md) with this content, from any
+// path. Claude Code tracks those files by path, so after a cwd change it
+// attaches an unchanged file to the history again.
+func ClaudeSessionHasInstructions(env []string, cwd, sessionID, content string) bool {
+	content = normalizeClaudeInstructions(content)
+	if content == "" {
+		return false
+	}
+	configDir, err := claudeConfigDir(env, cwd)
+	if err != nil {
+		return false
+	}
+	path, err := findClaudeSessionFile(configDir, sessionID)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, claudeSessionReadChunkSize), 64<<20)
+	marker := []byte(`"instructions"`)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.Contains(line, marker) {
+			continue
+		}
+		var entry struct {
+			Attachment struct {
+				Type  string `json:"type"`
+				Files []struct {
+					Content string `json:"content"`
+				} `json:"files"`
+			} `json:"attachment"`
+		}
+		if json.Unmarshal(line, &entry) != nil || entry.Attachment.Type != "instructions" {
+			continue
+		}
+		for _, file := range entry.Attachment.Files {
+			if normalizeClaudeInstructions(file.Content) == content {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findClaudeSessionFile(configDir, sessionID string) (string, error) {

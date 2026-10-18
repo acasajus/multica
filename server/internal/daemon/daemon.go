@@ -6482,8 +6482,7 @@ func providerNeedsInlineSystemPrompt(provider string) bool {
 
 // gateResumeToReachableSession clears the task's prior session unless this run
 // can actually reach the store the session lives in, and reports whether that
-// held. Most CLI backends key their session stores to the cwd (Claude Code
-// looks sessions up under ~/.claude/projects/<encoded-cwd>/), so a session id
+// held. Most CLI backends key their session stores to the cwd, so a session id
 // from a different workdir can never resolve: the CLI exits within a second
 // and the run fails before doing any work — permanently, because the failed
 // run records no session and the next claim serves the same stale pointer
@@ -6505,7 +6504,10 @@ func providerNeedsInlineSystemPrompt(provider string) bool {
 // store must still drop the resume, even when the cwd matches (#6806).
 // Codex also has a conversation-scoped store for local_directory tasks. A
 // continued worktree may use a new cwd while retaining its branch and rollout.
-// Managed Codex tasks still require the same existing directory.
+// Claude Code files a transcript under its starting cwd but resumes it by id
+// from any cwd, so a continued worktree keeps its Claude session too while the
+// transcript is still on disk. Managed Codex and Claude tasks still require the
+// same existing directory.
 // sameExistingDir reports whether two paths name the same existing directory.
 // False when either cannot be stat'd, which is the safe answer for cwd-keyed
 // providers: an absent prior workdir means there is nothing to resume from.
@@ -6532,13 +6534,36 @@ func codexWorktreeResumeEligible(env *execenv.Environment, store string) bool {
 	return env != nil && env.LocalWorktree != nil && env.LocalWorktree.Continued && env.CodexHome != "" && store != ""
 }
 
-func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv, provider, envWorkDir string, sessionHomeReachable, refusesMissingSessionCwd, codexWorktreeResumeEligible bool, taskLog *slog.Logger) bool {
+// claudeWorktreeResumeEligible is the Claude counterpart: the worktree continues
+// this conversation's branch and the session's transcript is still on disk.
+// Each local_directory turn gets a new worktree path, so without this every
+// Claude turn there started cold and rebuilt its context from the issue.
+func claudeWorktreeResumeEligible(env *execenv.Environment, processEnv []string, sessionID string) bool {
+	return env != nil && env.LocalWorktree != nil && env.LocalWorktree.Continued && sessionID != "" &&
+		agent.ClaudeSessionTranscriptPresent(processEnv, env.WorkDir, sessionID)
+}
+
+// worktreeResumeEligible reports whether provider may resume across a changed
+// local worktree cwd. Only providers whose session store is not keyed to the
+// cwd qualify.
+func worktreeResumeEligible(provider string, env *execenv.Environment, codexStore string, processEnv []string, sessionID string) bool {
+	switch provider {
+	case "codex":
+		return codexWorktreeResumeEligible(env, codexStore)
+	case "claude":
+		return claudeWorktreeResumeEligible(env, processEnv, sessionID)
+	default:
+		return false
+	}
+}
+
+func gateResumeToReachableSession(task *Task, taskCtx *execenv.TaskContextForEnv, provider, envWorkDir string, sessionHomeReachable, refusesMissingSessionCwd, worktreeResumeEligible bool, taskLog *slog.Logger) bool {
 	var reachable bool
 	if providerUsesPiSessionFile(provider) {
 		reachable = piSessionResumable(task.PriorSessionID, refusesMissingSessionCwd)
 	} else if provider == "hermes" {
 		reachable = sessionHomeReachable
-	} else if provider == "codex" && codexWorktreeResumeEligible {
+	} else if (provider == "codex" || provider == "claude") && worktreeResumeEligible {
 		reachable = sessionHomeReachable
 	} else {
 		// Compare the directories, not the spelling. Reuse runs in the canonical
@@ -8420,7 +8445,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		&task, &taskCtx, provider, env.WorkDir,
 		sessionHomeReachable(provider, env, envReused),
 		providerRefusesMissingSessionCwd(provider, !usesCustomProfileCommand),
-		provider == "codex" && codexWorktreeResumeEligible(env, execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx)),
+		worktreeResumeEligible(provider, env, execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx), os.Environ(), task.PriorSessionID),
 		taskLog,
 	)
 	// A reachable workdir or continued local worktree is not sufficient for a

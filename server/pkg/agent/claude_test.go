@@ -1321,3 +1321,38 @@ func TestBuildClaudeArgsManagedSkillSettingsWins(t *testing.T) {
 		t.Fatalf("unrelated custom arg was dropped: %v", args)
 	}
 }
+
+// Claude Code resumes by session id from any cwd, so the lookup must find a
+// transcript filed under ANOTHER directory's project folder — the prior
+// worktree's — not only under the current cwd's.
+func TestClaudeSessionTranscriptPresent(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir()
+	priorProject := filepath.Join(configDir, "projects", "-ws-prior-worktree")
+	if err := os.MkdirAll(priorProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(priorProject, "sess-1.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CLAUDE_CONFIG_DIR=" + configDir}
+	cwd := t.TempDir()
+
+	for _, tt := range []struct {
+		name      string
+		sessionID string
+		want      bool
+	}{
+		{name: "transcript under another cwd", sessionID: "sess-1", want: true},
+		{name: "missing transcript", sessionID: "sess-2"},
+		{name: "empty id", sessionID: ""},
+		{name: "path traversal id", sessionID: "../sess-1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClaudeSessionTranscriptPresent(env, cwd, tt.sessionID); got != tt.want {
+				t.Fatalf("ClaudeSessionTranscriptPresent(%q) = %v, want %v", tt.sessionID, got, tt.want)
+			}
+		})
+	}
+}

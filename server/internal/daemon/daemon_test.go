@@ -2110,7 +2110,7 @@ func TestGateCodexResumeAcrossLocalWorktrees(t *testing.T) {
 		{name: "managed workdir", provider: "codex", stableStore: true, codexHome: true, rolloutPresent: true},
 		{name: "in-place changed workdir", provider: "codex", localDirectory: true, stableStore: true, codexHome: true, rolloutPresent: true},
 		{name: "in-place same workdir", provider: "codex", localDirectory: true, stableStore: true, codexHome: true, sameWorkdir: true, rolloutPresent: true, wantResume: true},
-		{name: "other provider", provider: "claude", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, codexHome: true, rolloutPresent: true},
+		{name: "other provider", provider: "opencode", localWorktree: &execenv.LocalWorktree{Continued: true}, stableStore: true, codexHome: true, rolloutPresent: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			task := Task{PriorSessionID: "session-1", PriorWorkDir: priorDir}
@@ -2136,6 +2136,52 @@ func TestGateCodexResumeAcrossLocalWorktrees(t *testing.T) {
 			}
 			if got := task.PriorSessionID != ""; got != tt.wantResume {
 				t.Fatalf("resume=%v, want %v", got, tt.wantResume)
+			}
+			if taskCtx.PriorSessionResumed != tt.wantResume || task.PriorSessionResumeUnavailable == tt.wantResume || taskCtx.PriorSessionResumeUnavailable == tt.wantResume {
+				t.Fatalf("inconsistent resume state: task=%+v taskCtx=%+v", task, taskCtx)
+			}
+		})
+	}
+}
+
+// Claude Code resumes by session id from any cwd (verified on 2.1.301), so a
+// continued local worktree keeps its conversation even though every turn gets
+// a new worktree path. Before this, each such turn started cold.
+func TestGateClaudeResumeAcrossLocalWorktrees(t *testing.T) {
+	priorDir, workDir, configDir := t.TempDir(), t.TempDir(), t.TempDir()
+	project := filepath.Join(configDir, "projects", "-prior-worktree")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "session-1.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processEnv := []string{"CLAUDE_CONFIG_DIR=" + configDir}
+
+	for _, tt := range []struct {
+		name          string
+		sessionID     string
+		localWorktree *execenv.LocalWorktree
+		sameWorkdir   bool
+		wantResume    bool
+	}{
+		{name: "continued branch and transcript", sessionID: "session-1", localWorktree: &execenv.LocalWorktree{Continued: true}, wantResume: true},
+		{name: "new branch", sessionID: "session-1", localWorktree: &execenv.LocalWorktree{}},
+		{name: "missing transcript", sessionID: "session-2", localWorktree: &execenv.LocalWorktree{Continued: true}},
+		{name: "managed changed workdir", sessionID: "session-1"},
+		{name: "managed same workdir", sessionID: "session-1", sameWorkdir: true, wantResume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := Task{PriorSessionID: tt.sessionID, PriorWorkDir: priorDir}
+			taskCtx := execenv.TaskContextForEnv{PriorSessionResumed: true}
+			env := &execenv.Environment{WorkDir: workDir, LocalWorktree: tt.localWorktree}
+			if tt.sameWorkdir {
+				env.WorkDir = priorDir
+			}
+			eligible := claudeWorktreeResumeEligible(env, processEnv, task.PriorSessionID)
+			got := gateResumeToReachableSession(&task, &taskCtx, "claude", env.WorkDir, true, false, eligible, slog.Default())
+			if got != tt.wantResume || (task.PriorSessionID != "") != tt.wantResume {
+				t.Fatalf("reachable=%v session=%q, want resume=%v", got, task.PriorSessionID, tt.wantResume)
 			}
 			if taskCtx.PriorSessionResumed != tt.wantResume || task.PriorSessionResumeUnavailable == tt.wantResume || taskCtx.PriorSessionResumeUnavailable == tt.wantResume {
 				t.Fatalf("inconsistent resume state: task=%+v taskCtx=%+v", task, taskCtx)

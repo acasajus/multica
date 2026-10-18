@@ -933,6 +933,20 @@ func lastClaudeEnvValue(env []string, key string) (string, bool) {
 	return "", false
 }
 
+// ClaudeSessionTranscriptPresent reports whether the Claude config dir that env
+// resolves to holds a transcript for sessionID, under any project folder.
+// Claude Code files a session under the cwd it started in but resumes it by id
+// from any cwd (verified on 2.1.301), so this — not the prior workdir — is what
+// decides whether a resume can load.
+func ClaudeSessionTranscriptPresent(env []string, cwd, sessionID string) bool {
+	configDir, err := claudeConfigDir(env, cwd)
+	if err != nil {
+		return false
+	}
+	_, err = findClaudeSessionFile(configDir, sessionID)
+	return err == nil
+}
+
 func findClaudeSessionFile(configDir, sessionID string) (string, error) {
 	if sessionID == "" || sessionID == "." || sessionID == ".." || strings.ContainsAny(sessionID, "/\\:\x00") {
 		return "", fmt.Errorf("invalid Claude session id %q", sessionID)
